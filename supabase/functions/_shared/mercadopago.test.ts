@@ -103,3 +103,24 @@ Deno.test("reconciliação Mercado Pago exige id, valor, moeda e referência", (
     ApiHttpError,
   );
 });
+
+Deno.test("reconciliação Pix não bloqueia quando o e-mail do provedor diverge", () => {
+  const remote = {
+    id: 123456,
+    status: "approved",
+    external_reference: "d48d4ef2-759d-4ae7-bcc7-d93a00b57f88",
+    transaction_amount: 59.9,
+    currency_id: "BRL",
+    payment_method_id: "pix",
+    payer: { email: "outro-email@example.com" },
+  };
+  assertEquals(
+    assertMercadoPagoPaymentContract(remote, {
+      paymentId: remote.external_reference,
+      providerPaymentId: "123456",
+      amountCents: 5990,
+      buyerEmail: "cliente@example.com",
+    }),
+    { providerId: "123456", status: "approved" },
+  );
+});

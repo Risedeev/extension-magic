@@ -92,7 +92,7 @@ export function PixCheckoutDialog({
       }
     };
     tick();
-    pollRef.current = window.setInterval(tick, 4000) as unknown as number;
+    pollRef.current = window.setInterval(tick, 2000) as unknown as number;
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
     };

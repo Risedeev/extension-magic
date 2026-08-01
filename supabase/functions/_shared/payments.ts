@@ -1,6 +1,105 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2.110.2";
 import { generateLicenseKey, hashLicenseKey } from "./license.ts";
 
+const FINAL_PAYMENT_STATUSES = ["refunded", "charged_back"];
+
+export function effectiveProviderStatus(
+  current: { status?: string | null; paid_at?: string | null },
+  providerStatus: string,
+): string {
+  if (FINAL_PAYMENT_STATUSES.includes(String(current.status))) {
+    return String(current.status);
+  }
+  if (FINAL_PAYMENT_STATUSES.includes(providerStatus)) {
+    return providerStatus;
+  }
+  if (current.status === "approved" || current.paid_at) {
+    return "approved";
+  }
+  if (providerStatus === "approved") {
+    return "approved";
+  }
+  return providerStatus;
+}
+
+async function forceApplyProviderPaymentStatus(
+  admin: SupabaseClient,
+  input: {
+    paymentId: string;
+    providerPaymentId: string;
+    status: string;
+    raw: unknown;
+  },
+): Promise<string> {
+  const { data: payment, error: readError } = await admin
+    .from("payments")
+    .select("id, status, paid_at, license_id, provider_payment_id")
+    .eq("id", input.paymentId)
+    .maybeSingle();
+  if (readError) throw readError;
+  if (!payment) throw new Error("Pagamento não encontrado ao reconciliar.");
+  if (
+    payment.provider_payment_id &&
+    payment.provider_payment_id !== input.providerPaymentId
+  ) {
+    throw new Error("Pagamento retornado pelo provedor não corresponde ao checkout.");
+  }
+
+  const status = effectiveProviderStatus(payment, input.status);
+  const { error: updateError } = await admin
+    .from("payments")
+    .update({
+      status,
+      provider_payment_id: input.providerPaymentId,
+      raw: input.status === "approved" || status !== "approved" ? input.raw : undefined,
+      paid_at: status === "approved" ? new Date().toISOString() : undefined,
+    })
+    .eq("id", input.paymentId);
+  if (updateError) throw updateError;
+
+  if (FINAL_PAYMENT_STATUSES.includes(status) && payment.license_id) {
+    const { error } = await admin
+      .from("licenses")
+      .update({ status: "revoked" })
+      .eq("id", payment.license_id)
+      .neq("status", "revoked");
+    if (error) throw error;
+  } else if (status === "approved" && payment.license_id) {
+    const { error } = await admin
+      .from("licenses")
+      .update({ status: "pending" })
+      .eq("id", payment.license_id)
+      .eq("status", "revoked")
+      .is("activated_at", null);
+    if (error) throw error;
+  }
+
+  return status;
+}
+
+function canFallbackToSingleLicenseRpc(error: { code?: string; message?: string }): boolean {
+  const text = `${error.code ?? ""} ${error.message ?? ""}`;
+  return /42883|finalize_approved_payment_bulk|function .* does not exist|schema cache/i.test(text);
+}
+
+async function finalizeSinglePaymentLicense(
+  admin: SupabaseClient,
+  paymentId: string,
+): Promise<string[]> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const key = generateLicenseKey();
+    const hash = await hashLicenseKey(key);
+    const { data, error } = await admin.rpc("finalize_approved_payment", {
+      p_payment_id: paymentId,
+      p_license_key: key,
+      p_license_key_hash: hash,
+    });
+    if (!error) return typeof data === "string" && data ? [data] : [];
+    if (error.code !== "23505") throw error;
+  }
+  throw new Error("Não foi possível gerar uma chave única. Tente novamente.");
+}
+
 export async function applyProviderPaymentStatus(
   admin: SupabaseClient,
   input: {
@@ -16,9 +115,31 @@ export async function applyProviderPaymentStatus(
     p_status: input.status,
     p_raw: input.raw,
   });
-  if (error) throw error;
+  if (error) {
+    console.warn(
+      "[payment-status:fallback]",
+      JSON.stringify({
+        paymentId: input.paymentId,
+        providerPaymentId: input.providerPaymentId,
+        status: input.status,
+        message: error.message,
+      }),
+    );
+    return forceApplyProviderPaymentStatus(admin, input);
+  }
   if (typeof data !== "string") {
     throw new Error("Resposta inválida ao reconciliar pagamento.");
+  }
+  if (input.status === "approved" && data !== "approved") {
+    console.warn(
+      "[payment-status:override-approved]",
+      JSON.stringify({
+        paymentId: input.paymentId,
+        providerPaymentId: input.providerPaymentId,
+        rpcStatus: data,
+      }),
+    );
+    return forceApplyProviderPaymentStatus(admin, input);
   }
   return data;
 }
@@ -41,6 +162,18 @@ export async function finalizePaymentLicenses(
     });
     if (!error) {
       return Array.isArray(data) ? (data as string[]) : [];
+    }
+    if (canFallbackToSingleLicenseRpc(error)) {
+      if (total !== 1) {
+        throw new Error(
+          "A função de geração em lote não está publicada no banco. Publique as migrations antes de vender múltiplas chaves.",
+        );
+      }
+      console.warn(
+        "[payment-finalize:single-fallback]",
+        JSON.stringify({ paymentId, message: error.message }),
+      );
+      return finalizeSinglePaymentLicense(admin, paymentId);
     }
     if (error.code !== "23505") throw error;
   }

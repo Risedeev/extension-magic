@@ -1321,6 +1321,21 @@ async function createMarketplaceOrder(context: AuthContext, input: unknown) {
   return { order: { id: order.id, status: order.status } };
 }
 
+function isMissingMarketplacePixColumns(error: unknown): boolean {
+  const record = error as { code?: unknown; message?: unknown; details?: unknown };
+  const code = typeof record?.code === "string" ? record.code : "";
+  const text = [record?.message, record?.details]
+    .filter((value) => typeof value === "string")
+    .join(" ");
+  return (
+    code === "42703" ||
+    code === "PGRST204" ||
+    (/schema cache|column|could not find/i.test(text) &&
+      /provider_payment_id|client_request_id|qr_code|qr_code_base64|ticket_url|expires_at|buyer_name|buyer_whatsapp|buyer_email|raw/i
+        .test(text))
+  );
+}
+
 async function createMarketplacePixCheckout(context: AuthContext, input: unknown) {
   const data = z
     .object({
@@ -1360,31 +1375,60 @@ async function createMarketplacePixCheckout(context: AuthContext, input: unknown
   const buyerName = data.buyer_name.trim().replace(/\s+/g, " ");
   const buyerWhatsapp = digits(data.buyer_whatsapp);
   const buyerCpf = digits(data.buyer_cpf ?? "");
+  const legacyRequestNote = `pix:${data.idempotency_key}`;
 
-  const existing = await context.admin
+  let supportsPixColumns = true;
+  let existing = await context.admin
     .from("marketplace_orders")
     .select("*")
     .eq("buyer_id", context.userId)
     .eq("client_request_id", data.idempotency_key)
     .maybeSingle();
-  if (existing.error) throw existing.error;
+  if (existing.error) {
+    if (!isMissingMarketplacePixColumns(existing.error)) throw existing.error;
+    supportsPixColumns = false;
+    existing = await context.admin
+      .from("marketplace_orders")
+      .select("*")
+      .eq("buyer_id", context.userId)
+      .eq("buyer_note", legacyRequestNote)
+      .maybeSingle();
+    if (existing.error) throw existing.error;
+  }
 
   let order = existing.data;
   if (!order) {
-    const inserted = await context.admin
+    const fullInsert = {
+      product_id: product.id,
+      buyer_id: context.userId,
+      amount_cents: product.price_cents,
+      status: "pending",
+      client_request_id: data.idempotency_key,
+      buyer_name: buyerName,
+      buyer_whatsapp: buyerWhatsapp,
+      buyer_email: context.email,
+    };
+    const legacyInsert = {
+      product_id: product.id,
+      buyer_id: context.userId,
+      amount_cents: product.price_cents,
+      status: "pending",
+      buyer_note: legacyRequestNote,
+    };
+    const insertPayload: Record<string, unknown> = supportsPixColumns ? fullInsert : legacyInsert;
+    let inserted = await context.admin
       .from("marketplace_orders")
-      .insert({
-        product_id: product.id,
-        buyer_id: context.userId,
-        amount_cents: product.price_cents,
-        status: "pending",
-        client_request_id: data.idempotency_key,
-        buyer_name: buyerName,
-        buyer_whatsapp: buyerWhatsapp,
-        buyer_email: context.email,
-      })
+      .insert(insertPayload as any)
       .select()
       .single();
+    if (inserted.error && supportsPixColumns && isMissingMarketplacePixColumns(inserted.error)) {
+      supportsPixColumns = false;
+      inserted = await context.admin
+        .from("marketplace_orders")
+        .insert(legacyInsert as any)
+        .select()
+        .single();
+    }
     if (inserted.error) throw inserted.error;
     order = inserted.data;
   }
@@ -1428,18 +1472,23 @@ async function createMarketplacePixCheckout(context: AuthContext, input: unknown
       );
     }
 
-    const { error: updateError } = await context.admin
-      .from("marketplace_orders")
-      .update({
-        provider_payment_id: String(pix.raw?.id ?? ""),
-        qr_code: pix.qr_code,
-        qr_code_base64: pix.qr_code_base64,
-        ticket_url: pix.ticket_url,
-        expires_at: pix.date_of_expiration,
-        raw: pix.raw ?? null,
-      })
-      .eq("id", order.id);
-    if (updateError) throw updateError;
+    if (supportsPixColumns) {
+      const { error: updateError } = await context.admin
+        .from("marketplace_orders")
+        .update({
+          provider_payment_id: String(pix.raw?.id ?? ""),
+          qr_code: pix.qr_code,
+          qr_code_base64: pix.qr_code_base64,
+          ticket_url: pix.ticket_url,
+          expires_at: pix.date_of_expiration,
+          raw: pix.raw ?? null,
+        })
+        .eq("id", order.id);
+      if (updateError) {
+        if (!isMissingMarketplacePixColumns(updateError)) throw updateError;
+        supportsPixColumns = false;
+      }
+    }
 
     let status = order.status;
     if (pix.raw?.status === "approved") {

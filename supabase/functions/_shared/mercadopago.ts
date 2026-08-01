@@ -114,19 +114,10 @@ export function assertMercadoPagoPaymentContract(
   const method = payment?.payment_method_id == null
     ? ""
     : String(payment.payment_method_id);
-  const payer = payment?.payer && typeof payment.payer === "object"
-    ? payment.payer as Record<string, unknown>
-    : null;
-  const remoteEmail = payer?.email == null
-    ? null
-    : String(payer.email).trim().toLowerCase();
-  const expectedEmail = expected.buyerEmail?.trim().toLowerCase() || null;
-  // A consulta autenticada do Mercado Pago mascara PII em pagamentos antigos
-  // (por exemplo, "XXXXXXXXXXX"). Isso não é uma divergência de pagador.
-  const remoteEmailIsComparable = !!remoteEmail &&
-    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(remoteEmail) &&
-    !/^x+(@|$)/i.test(remoteEmail);
-
+  // Em Pix, o e-mail retornado pelo Mercado Pago pode vir mascarado ou como
+  // o e-mail da conta pagadora, não necessariamente o e-mail do cadastro.
+  // A amarração segura fica em provider id, external_reference, valor,
+  // moeda e método de pagamento.
   const matches = providerId.length > 0 &&
     (!expected.providerPaymentId ||
       providerId === expected.providerPaymentId) &&
@@ -134,8 +125,7 @@ export function assertMercadoPagoPaymentContract(
     amountCents === expected.amountCents &&
     currency === "BRL" &&
     method === "pix" &&
-    PAYMENT_STATUSES.has(status) &&
-    (!expectedEmail || !remoteEmailIsComparable || remoteEmail === expectedEmail);
+    PAYMENT_STATUSES.has(status);
 
   if (!matches) {
     throw new ApiHttpError(
