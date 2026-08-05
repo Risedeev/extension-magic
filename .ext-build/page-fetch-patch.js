@@ -22,11 +22,9 @@
             if (!obj || typeof obj !== 'object') return bodyText;
             // Só reescreve se parece um envio de chat (tem "message" e não é fix_error ainda)
             if (typeof obj.message !== 'string') return bodyText;
-            obj.chat_only = false;
             obj.intent = 'fix_error';
             obj.contains_error = true;
             obj.error_ids = [FALLBACK_EVENT_ID];
-            delete obj.error_source;
             obj.message_intent_metadata = {
                 fix_error_metadata: {
                     errors: [{
