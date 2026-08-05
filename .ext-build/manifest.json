@@ -44,6 +44,7 @@
         "popup.css",
         "popup.js",
         "license.js",
+        "fix-error-transport.js",
         "history.js",
         "ui-extras.js",
         "page-fetch-patch.js",

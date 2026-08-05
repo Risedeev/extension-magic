@@ -599,21 +599,7 @@ async function sendMessage() {
         };
 
         // ─── Modo Plano (PLAN) ───────────────────────────────────────────
-        // Com o truque fix_error o backend ignora chat_only, então para o modo
-        // plano funcionar de verdade limpamos os campos de erro e enviamos como
-        // chat comum com chat_only=true (essa é a forma que a UI oficial usa).
-        // Quando desligado, o payload original (fix_error) permanece intacto e
-        // continua sem consumir créditos.
-        let __planMode = false;
-        try { __planMode = localStorage.getItem('lvbl_modo_plano') === '1'; } catch (_) {}
-        if (__planMode) {
-            messageBody.chat_only = true;
-            messageBody.intent = undefined;
-            messageBody.contains_error = false;
-            messageBody.error_ids = [];
-            messageBody.error_source = undefined;
-            messageBody.message_intent_metadata = undefined;
-        }
+        // O Modo Plano so prepara o texto; o transporte permanece fix_error.
 
 
         
